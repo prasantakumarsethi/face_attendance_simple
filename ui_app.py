@@ -1,6 +1,5 @@
 import sys, time
-from dataclasses import dataclass
-from datetime import datetime, time as dtime
+from datetime import datetime
 from pathlib import Path
 from uuid import uuid4
 
@@ -14,62 +13,66 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QTabWidget,
     QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QLineEdit,
     QSpinBox, QCheckBox, QGroupBox, QFrame,
-    QTableWidget, QTableWidgetItem, QFileDialog,
-    QDialog, QFormLayout, QDialogButtonBox, QComboBox, QMessageBox
+    QTableWidget, QTableWidgetItem, QFileDialog, QMessageBox,
+    QComboBox, QDialog, QFormLayout, QDialogButtonBox
 )
 
 # ==========================
 # CONFIG
 # ==========================
-APP_TITLE = "Smart Face Attendance System"
+APP_TITLE = "AI Smart Face Attendance System"
+FACE_SIZE = (200, 200)
 DEFAULT_THRESHOLD = 60
 COOLDOWN_SECONDS = 2.0
 UNKNOWN_SAVE_COOLDOWN = 4.0
+REG_SAMPLES_DEFAULT = 50
 REG_BLUR_MIN = 35
-FACE_SIZE = (200, 200)
 
-# Preview fixed size (prevents growth)
-PREVIEW_W = 840
-PREVIEW_H = 480
+PREVIEW_MAX_W = 860
+PREVIEW_MAX_H = 500
+PREVIEW_MIN_W = 640
+PREVIEW_MIN_H = 360
+
+ATT_COLS = ["record_id","date","time","person_id","name","event","confidence","operator","snapshot_path"]
 
 # ==========================
-# PATHS (same as your project)
+# PATHS
 # ==========================
 DATASET_DIR = Path("dataset")
 TRAINER_DIR = Path("trainer")
 TRAINER_PATH = TRAINER_DIR / "trainer.yml"
 
 LOG_DIR = Path("attendance_logs")
-SNAP_DIR = LOG_DIR / "snapshots"
-SNAP_MARKED = SNAP_DIR / "marked"
-SNAP_UNKNOWN = SNAP_DIR / "unknown"
+SNAP_MARKED = LOG_DIR / "snapshots" / "marked"
+SNAP_UNKNOWN = LOG_DIR / "snapshots" / "unknown"
 
-for d in [DATASET_DIR, TRAINER_DIR, LOG_DIR, SNAP_DIR, SNAP_MARKED, SNAP_UNKNOWN]:
+for d in [DATASET_DIR, TRAINER_DIR, LOG_DIR, SNAP_MARKED, SNAP_UNKNOWN]:
     d.mkdir(parents=True, exist_ok=True)
 
 # ==========================
-# OpenCV cascades
+# OpenCV
 # ==========================
 FACE_CASCADE = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
 EYE_CASCADE = cv2.data.haarcascades + "haarcascade_eye.xml"
 face_cascade = cv2.CascadeClassifier(FACE_CASCADE)
 eye_cascade = cv2.CascadeClassifier(EYE_CASCADE)
 
-ATT_COLS = [
-    "record_id", "date", "time", "person_id", "name",
-    "event", "status", "confidence", "operator", "snapshot_path"
-]
-
+# ==========================
+# Helpers
+# ==========================
 def today_str() -> str:
     return datetime.now().strftime("%Y-%m-%d")
 
 def now_time_str() -> str:
     return datetime.now().strftime("%H:%M:%S")
 
+def now_ts() -> float:
+    return time.time()
+
 def attendance_path_for(date_str: str) -> Path:
     return LOG_DIR / f"attendance_{date_str}.csv"
 
-def ensure_att_cols(df: pd.DataFrame) -> pd.DataFrame:
+def ensure_cols(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
         return pd.DataFrame(columns=ATT_COLS)
     for c in ATT_COLS:
@@ -80,15 +83,14 @@ def ensure_att_cols(df: pd.DataFrame) -> pd.DataFrame:
 def load_day_df(date_str: str) -> pd.DataFrame:
     p = attendance_path_for(date_str)
     if not p.exists():
-        return ensure_att_cols(pd.DataFrame())
+        return ensure_cols(pd.DataFrame())
     try:
-        return ensure_att_cols(pd.read_csv(p))
+        return ensure_cols(pd.read_csv(p))
     except Exception:
-        return ensure_att_cols(pd.DataFrame())
+        return ensure_cols(pd.DataFrame())
 
 def save_day_df(date_str: str, df: pd.DataFrame):
-    df = ensure_att_cols(df)
-    df.to_csv(attendance_path_for(date_str), index=False)
+    ensure_cols(df).to_csv(attendance_path_for(date_str), index=False)
 
 def export_all_combined_df() -> pd.DataFrame:
     frames = []
@@ -98,11 +100,11 @@ def export_all_combined_df() -> pd.DataFrame:
         except Exception:
             pass
     if not frames:
-        return ensure_att_cols(pd.DataFrame())
-    return ensure_att_cols(pd.concat(frames, ignore_index=True))
+        return ensure_cols(pd.DataFrame())
+    return ensure_cols(pd.concat(frames, ignore_index=True))
 
 def load_registered_map() -> dict[int, str]:
-    mp: dict[int, str] = {}
+    mp = {}
     for p in DATASET_DIR.iterdir():
         if p.is_dir():
             parts = p.name.split("_", 1)
@@ -117,91 +119,81 @@ def registered_df() -> pd.DataFrame:
             parts = p.name.split("_", 1)
             if len(parts) == 2 and parts[0].isdigit():
                 pid = int(parts[0])
-                name = parts[1].replace("_", " ")
-                samples = len(list(p.glob("*.jpg")))
-                rows.append({"person_id": pid, "name": name, "samples": samples})
+                rows.append({"person_id": pid, "name": parts[1].replace("_"," "), "samples": len(list(p.glob("*.jpg")))})
     df = pd.DataFrame(rows)
-    if not df.empty:
-        df = df.sort_values(by="person_id")
-    return df
+    return df.sort_values("person_id") if not df.empty else df
 
 def blur_score(gray_face: np.ndarray) -> float:
     return float(cv2.Laplacian(gray_face, cv2.CV_64F).var())
 
-def frame_to_pixmap(frame_bgr: np.ndarray, target_w: int, target_h: int) -> QPixmap:
+def frame_to_pixmap(frame_bgr: np.ndarray, w: int, h: int) -> QPixmap:
     rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-    h, w, ch = rgb.shape
-    img = QImage(rgb.data, w, h, ch * w, QImage.Format_RGB888)
-    return QPixmap.fromImage(img).scaled(target_w, target_h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+    hh, ww, ch = rgb.shape
+    img = QImage(rgb.data, ww, hh, ch * ww, QImage.Format_RGB888)
+    return QPixmap.fromImage(img).scaled(w, h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
 
-def parse_hhmm(hhmm: str) -> dtime:
-    # hhmm like "16:00"
-    hh, mm = hhmm.split(":")
-    return dtime(int(hh), int(mm), 0)
+def ai_popup(parent, title: str, text: str, icon=QMessageBox.Information):
+    m = QMessageBox(parent)
+    m.setWindowTitle(title)
+    m.setText(text)
+    m.setIcon(icon)
+    m.setStyleSheet("""
+        QMessageBox { background: #050816; }
+        QLabel { color: #ffffff; font-size: 14px; font-weight: 900; }
+        QPushButton {
+            background: qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #00e5ff, stop:1 #7c3aed);
+            color: #050816;
+            padding: 8px 14px;
+            border-radius: 10px;
+            font-weight: 1000;
+        }
+    """)
+    m.exec()
 
-def time_to_hhmm(t: dtime) -> str:
-    return f"{t.hour:02d}:{t.minute:02d}"
+class ClickableCard(QFrame):
+    clicked = Signal()
+    def mousePressEvent(self, e):
+        self.clicked.emit()
+        super().mousePressEvent(e)
 
 class BlinkGate:
     def __init__(self):
         self.had_eyes = False
         self.last_blink_ts = 0.0
-
-    def update(self, gray_face: np.ndarray, now_ts: float) -> float:
-        eyes = eye_cascade.detectMultiScale(gray_face, scaleFactor=1.2, minNeighbors=6, minSize=(20, 20))
+    def update(self, gray_face, now_ts_: float) -> float:
+        eyes = eye_cascade.detectMultiScale(gray_face, 1.2, 6, minSize=(20, 20))
         has_eyes = len(eyes) >= 1
         if has_eyes:
             self.had_eyes = True
         if self.had_eyes and not has_eyes:
-            self.last_blink_ts = now_ts
+            self.last_blink_ts = now_ts_
             self.had_eyes = False
         return self.last_blink_ts
-
-class ClickableCard(QFrame):
-    clicked = Signal()
-    def mousePressEvent(self, event):
-        self.clicked.emit()
-        super().mousePressEvent(event)
-
-def show_popup(parent, title: str, text: str, icon=QMessageBox.Information):
-    m = QMessageBox(parent)
-    m.setIcon(icon)
-    m.setWindowTitle(title)
-    m.setText(text)
-    # Force readable popup text (fix)
-    m.setStyleSheet("""
-        QMessageBox { background: white; }
-        QLabel { color: #0f172a; font-size: 14px; font-weight: 700; }
-        QPushButton { background:#2563eb; color:white; padding:8px 14px; border-radius:10px; font-weight:800; }
-        QPushButton:hover { background:#1d4ed8; }
-    """)
-    m.exec()
 
 class EditDialog(QDialog):
     def __init__(self, parent, row: dict):
         super().__init__(parent)
-        self.setWindowTitle("Edit Attendance Record")
-        self.resize(540, 360)
+        self.setWindowTitle("Edit Record (All Fields)")
+        self.resize(560, 380)
 
         layout = QVBoxLayout(self)
         form = QFormLayout()
 
-        self.in_record_id = QLineEdit(str(row.get("record_id", ""))); self.in_record_id.setReadOnly(True)
-        self.in_date = QLineEdit(str(row.get("date", ""))); self.in_date.setReadOnly(True)
-        self.in_time = QLineEdit(str(row.get("time", ""))); self.in_time.setReadOnly(True)
+        self.in_record_id = QLineEdit(row.get("record_id","")); self.in_record_id.setReadOnly(True)
+        self.in_date = QLineEdit(row.get("date","")); self.in_date.setReadOnly(True)
+        self.in_time = QLineEdit(row.get("time","")); self.in_time.setReadOnly(True)
 
-        self.in_person_id = QLineEdit(str(row.get("person_id", "")))
-        self.in_name = QLineEdit(str(row.get("name", "")))
+        self.in_person_id = QLineEdit(row.get("person_id",""))
+        self.in_name = QLineEdit(row.get("name",""))
 
         self.in_event = QComboBox()
-        self.in_event.addItems(["IN", "OUT"])
-        cur_ev = str(row.get("event", "IN")).upper()
-        self.in_event.setCurrentText(cur_ev if cur_ev in ("IN", "OUT") else "IN")
+        self.in_event.addItems(["IN","OUT"])
+        ev = str(row.get("event","IN")).upper()
+        self.in_event.setCurrentText(ev if ev in ("IN","OUT") else "IN")
 
-        self.in_status = QLineEdit(str(row.get("status", "")))
-        self.in_conf = QLineEdit(str(row.get("confidence", "")))
-        self.in_operator = QLineEdit(str(row.get("operator", "")))
-        self.in_snap = QLineEdit(str(row.get("snapshot_path", "")))
+        self.in_conf = QLineEdit(str(row.get("confidence","")))
+        self.in_operator = QLineEdit(row.get("operator",""))
+        self.in_snap = QLineEdit(row.get("snapshot_path",""))
 
         form.addRow("Record ID", self.in_record_id)
         form.addRow("Date", self.in_date)
@@ -209,18 +201,17 @@ class EditDialog(QDialog):
         form.addRow("Person ID", self.in_person_id)
         form.addRow("Name", self.in_name)
         form.addRow("Event", self.in_event)
-        form.addRow("Status", self.in_status)
         form.addRow("Confidence", self.in_conf)
         form.addRow("Operator", self.in_operator)
-        form.addRow("Snapshot", self.in_snap)
+        form.addRow("Snapshot Path", self.in_snap)
 
         layout.addLayout(form)
-        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
+        btns = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        btns.accepted.connect(self.accept)
+        btns.rejected.connect(self.reject)
+        layout.addWidget(btns)
 
-    def fields(self) -> dict:
+    def get_fields(self):
         pid = self.in_person_id.text().strip()
         if not pid.isdigit():
             raise ValueError("Person ID must be numeric.")
@@ -232,7 +223,6 @@ class EditDialog(QDialog):
             "person_id": int(pid),
             "name": self.in_name.text().strip(),
             "event": self.in_event.currentText(),
-            "status": self.in_status.text().strip(),
             "confidence": round(conf, 2),
             "operator": self.in_operator.text().strip(),
             "snapshot_path": self.in_snap.text().strip(),
@@ -242,30 +232,27 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle(APP_TITLE)
-        self.resize(1300, 820)
+        self.resize(1400, 860)
 
         self.cap = None
         self.timer = QTimer()
         self.timer.timeout.connect(self.on_frame)
-
         self.mode = None  # register/attendance
 
         self.reg_folder = None
-        self.reg_needed = 50
+        self.reg_needed = REG_SAMPLES_DEFAULT
         self.reg_taken = 0
 
         self.recognizer = None
         self.registered_map = load_registered_map()
 
-        self.cooldown = {}  # (pid,event)->last_ts
+        self.cooldown = {}
         self.last_unknown_ts = 0.0
-
         self.blink_gate = BlinkGate()
 
-        # Configurable time rules (UI)
-        self.late_after = dtime(9, 10, 0)
-        self.in_allowed_until = dtime(11, 0, 0)
-        self.out_allowed_after = dtime(16, 0, 0)
+        # OUT gap hours (easy operation)
+        self.last_in_time_ts = {}
+        self.out_gap_hours = 0  # UI default 0 hours
 
         self.build_ui()
         self.apply_theme()
@@ -274,158 +261,122 @@ class MainWindow(QMainWindow):
 
     def apply_theme(self):
         self.setStyleSheet("""
-            QMainWindow { background:#070b18; color:#e5e7eb; }
-            QLabel { color:#e5e7eb; }
-            QTabBar::tab {
-                background:#0f172a; color:#e5e7eb;
-                padding:10px 14px; margin-right:6px;
-                border-top-left-radius:12px; border-top-right-radius:12px;
-                font-weight:900;
-            }
-            QTabBar::tab:selected { background:#111827; border:1px solid #334155; }
+            QMainWindow { background:#050816; color:#ffffff; }
+            QLabel { color:#ffffff; }
+            QLabel#H1 { font-size:22px; font-weight:1000; color:#ffffff; }
+            QLabel#H2 { font-size:18px; font-weight:1000; color:#ffffff; }
+            QLabel#Lbl { font-size:13px; font-weight:900; color:#cfe7ff; }
+
+            QTabBar::tab { background:#0b1026; color:#ffffff; padding:10px 14px; margin-right:6px;
+                          border-top-left-radius:12px; border-top-right-radius:12px; font-weight:900; }
+            QTabBar::tab:selected { background:#111a3a; border:1px solid #2b3b7a; }
 
             QLineEdit, QSpinBox, QComboBox {
-                background:#0b1220;
-                color:#e5e7eb;
-                border:1px solid #334155;
-                border-radius:12px;
-                padding:9px;
-                font-weight:700;
+                background:#0b1026; color:#ffffff;
+                border:1px solid #2b3b7a; border-radius:12px; padding:9px;
+                font-weight:800;
             }
 
             QPushButton {
-                background:#2563eb;
-                color:white;
-                border-radius:12px;
-                padding:10px 12px;
-                font-weight:900;
+                background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #00e5ff, stop:1 #7c3aed);
+                color:#050816; border-radius:12px; padding:10px 12px; font-weight:1000;
             }
-            QPushButton:hover { background:#1d4ed8; }
-
-            QPushButton#danger { background:#ef4444; }
-            QPushButton#danger:hover { background:#dc2626; }
-
-            QPushButton#secondary { background:#10b981; color:#052e24; }
-            QPushButton#secondary:hover { background:#059669; color:#ecfdf5; }
-
-            QFrame#Card {
-                background:qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 #0f172a, stop:1 #111827);
-                border:1px solid #334155;
-                border-radius:16px;
+            QPushButton#danger {
+                background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #ff3d71, stop:1 #ffb703);
+                color:#050816;
             }
-            QLabel#CardTitle { color:#cbd5e1; font-weight:900; }
+            QPushButton#secondary {
+                background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #22c55e, stop:1 #00e5ff);
+                color:#050816;
+            }
+
+            QFrame#Card { background:#0b1026; border:1px solid #2b3b7a; border-radius:16px; }
+            QLabel#CardTitle { color:#9adfff; font-weight:900; }
             QLabel#CardValue { font-size:26px; font-weight:1000; color:white; }
 
-            QLabel#Preview {
-                background:#020617;
-                border:1px solid #334155;
-                border-radius:14px;
-                color:#cbd5e1;
-                font-weight:900;
-            }
+            QLabel#Preview { background:#030615; border:1px solid #2b3b7a; border-radius:14px; color:#9adfff; font-weight:900; }
 
-            QLabel#BannerInfo {
-                padding:10px;
-                border-radius:12px;
-                background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #0b3b74, stop:1 #2563eb);
-                border:1px solid #1d4ed8;
-                font-weight:1000;
-                color:white;
+            QLabel#Banner {
+                padding:10px; border-radius:12px;
+                background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #00e5ff, stop:1 #7c3aed);
+                color:#050816; font-weight:1000;
             }
+            QLabel#StatusLine { padding:6px; color:#cfe7ff; font-weight:900; }
 
-            QGroupBox {
-                border:1px solid #334155;
-                border-radius:14px;
-                margin-top:10px;
-                padding:10px;
-                background:#0b1220;
-                font-weight:900;
-            }
+            QGroupBox { border:1px solid #2b3b7a; border-radius:14px; margin-top:10px; padding:10px; background:#0b1026; font-weight:900; }
             QGroupBox::title { subcontrol-origin: margin; subcontrol-position: top left; padding:0 8px; }
 
-            QTableWidget {
-                background:#061023;
-                border:1px solid #334155;
-                border-radius:14px;
-                gridline-color:#334155;
-                color:#e5e7eb;
-                selection-background-color:#2563eb;
-            }
-            QHeaderView::section {
-                background:#0f172a;
-                padding:8px;
-                border:0;
-                font-weight:900;
-                color:#e5e7eb;
-            }
-            QTableWidget::item { padding:6px; }
+            QTableWidget { background:#030615; border:1px solid #2b3b7a; border-radius:14px; gridline-color:#2b3b7a;
+                           color:#ffffff; selection-background-color:#7c3aed; }
+            QHeaderView::section { background:#0b1026; padding:8px; border:0; font-weight:900; color:#ffffff; }
         """)
 
     def build_ui(self):
         self.tabs = QTabWidget()
         self.setCentralWidget(self.tabs)
 
-        # DASHBOARD
+        # Dashboard
         dash = QWidget()
         dl = QVBoxLayout(dash)
 
-        header = QFrame()
-        header.setObjectName("HeaderBar")
-        header.setStyleSheet("""
-            QFrame {
-                background:qlineargradient(x1:0,y1:0,x2:1,y2:0,
-                    stop:0 #2563eb, stop:0.5 #7c3aed, stop:1 #f59e0b);
-                border-radius:16px;
-                padding:12px;
-            }
+        head = QLabel("AI DASHBOARD • SMART FACE ATTENDANCE")
+        head.setObjectName("H1")
+        head.setStyleSheet("""
+            padding:14px; border-radius:16px;
+            background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #00e5ff, stop:0.5 #7c3aed, stop:1 #ffb703);
+            color:#050816;
         """)
-        hl = QHBoxLayout(header)
-        title = QLabel(APP_TITLE)
-        title.setStyleSheet("font-size:22px; font-weight:1000; color:white;")
-        hl.addWidget(title)
-        hl.addStretch(1)
-        self.btn_dash_refresh = QPushButton("Refresh")
-        self.btn_dash_refresh.clicked.connect(self.refresh_all)
-        hl.addWidget(self.btn_dash_refresh)
-        dl.addWidget(header)
+        dl.addWidget(head)
 
         cards = QHBoxLayout()
-        self.card_reg = self.make_click_card("Registered", "0", "#22c55e", target_tab=1)
-        self.card_in = self.make_click_card("IN Today", "0", "#3b82f6", target_tab=3)
-        self.card_out = self.make_click_card("OUT Today", "0", "#f59e0b", target_tab=3)
-        self.card_unknown = self.make_click_card("Unknown Today", "0", "#ef4444", target_tab=2)
+        self.card_reg = self.card("REGISTERED", "0", lambda: self.tabs.setCurrentIndex(1))
+        self.card_in = self.card("IN TODAY", "0", lambda: self.tabs.setCurrentIndex(3))
+        self.card_out = self.card("OUT TODAY", "0", lambda: self.tabs.setCurrentIndex(3))
+        self.card_unknown = self.card("UNKNOWN TODAY", "0", lambda: self.tabs.setCurrentIndex(2))
         for c in [self.card_reg, self.card_in, self.card_out, self.card_unknown]:
             cards.addWidget(c)
         dl.addLayout(cards)
 
-        tip = QLabel("Click the cards to navigate. Configure IN/OUT time rules in Attendance tab.")
-        tip.setStyleSheet("color:#cbd5e1; font-weight:700; padding:8px;")
-        dl.addWidget(tip)
+        dl.addWidget(QLabel("<b>Recent Activity (Today)</b>"))
+        self.recent = QTableWidget(0, 5)
+        self.recent.setHorizontalHeaderLabels(["Time","ID","Name","Event","Confidence"])
+        self.recent.horizontalHeader().setStretchLastSection(True)
+        dl.addWidget(self.recent)
+
+        btn = QPushButton("⟳ REFRESH")
+        btn.clicked.connect(self.refresh_all)
+        dl.addWidget(btn)
         dl.addStretch(1)
 
-        # REGISTER TAB
+        # Register
         reg = QWidget()
         rl = QHBoxLayout(reg)
 
         left = QVBoxLayout()
-        left.addWidget(QLabel("<h2>Register</h2>"))
+        t = QLabel("Register")
+        t.setObjectName("H2")
+        left.addWidget(t)
 
-        self.reg_id = QLineEdit(); self.reg_id.setPlaceholderText("Numeric ID (e.g., 1)")
+        self.reg_id = QLineEdit(); self.reg_id.setPlaceholderText("Numeric ID")
         self.reg_name = QLineEdit(); self.reg_name.setPlaceholderText("Full name")
-        self.reg_samples = QSpinBox(); self.reg_samples.setRange(10, 200); self.reg_samples.setValue(50)
+        self.reg_samples = QSpinBox(); self.reg_samples.setRange(10, 200); self.reg_samples.setValue(REG_SAMPLES_DEFAULT)
 
-        self.btn_reg_start = QPushButton("Start Camera")
+        self.btn_reg_start = QPushButton("▶ START CAMERA")
         self.btn_reg_start.clicked.connect(lambda: self.start_camera("register"))
-        self.btn_reg_capture = QPushButton("Start Capture")
+        self.btn_reg_capture = QPushButton("● START CAPTURE")
         self.btn_reg_capture.clicked.connect(self.start_capture)
-        self.btn_train = QPushButton("Train Model"); self.btn_train.setObjectName("secondary")
+        self.btn_train = QPushButton("⚙ TRAIN MODEL"); self.btn_train.setObjectName("secondary")
         self.btn_train.clicked.connect(self.train_model)
-        self.btn_reg_stop = QPushButton("Stop Camera"); self.btn_reg_stop.setObjectName("danger")
+        self.btn_reg_stop = QPushButton("■ STOP"); self.btn_reg_stop.setObjectName("danger")
         self.btn_reg_stop.clicked.connect(self.stop_camera)
 
-        left.addWidget(QLabel("ID")); left.addWidget(self.reg_id)
-        left.addWidget(QLabel("Name")); left.addWidget(self.reg_name)
-        left.addWidget(QLabel("Samples")); left.addWidget(self.reg_samples)
+        lab = QLabel("ID"); lab.setObjectName("Lbl")
+        lab2 = QLabel("Name"); lab2.setObjectName("Lbl")
+        lab3 = QLabel("Samples"); lab3.setObjectName("Lbl")
+
+        left.addWidget(lab); left.addWidget(self.reg_id)
+        left.addWidget(lab2); left.addWidget(self.reg_name)
+        left.addWidget(lab3); left.addWidget(self.reg_samples)
         left.addWidget(self.btn_reg_start)
         left.addWidget(self.btn_reg_capture)
         left.addWidget(self.btn_train)
@@ -433,78 +384,69 @@ class MainWindow(QMainWindow):
         left.addStretch(1)
 
         right = QVBoxLayout()
-        self.reg_preview = QLabel("Registration Preview")
-        self.reg_preview.setObjectName("Preview")
-        self.reg_preview.setFixedSize(PREVIEW_W, PREVIEW_H)
+        self.reg_preview = QLabel("REGISTRATION PREVIEW"); self.reg_preview.setObjectName("Preview")
+        self.reg_preview.setMinimumSize(PREVIEW_MIN_W, PREVIEW_MIN_H)
+        self.reg_preview.setMaximumSize(PREVIEW_MAX_W, PREVIEW_MAX_H)
         self.reg_preview.setAlignment(Qt.AlignCenter)
-        self.reg_status = QLabel("Status: -")
-        self.reg_status.setStyleSheet("color:#cbd5e1; font-weight:700;")
+
+        self.reg_banner = QLabel("READY"); self.reg_banner.setObjectName("Banner"); self.reg_banner.setAlignment(Qt.AlignCenter)
+        self.reg_status = QLabel("Status: -"); self.reg_status.setObjectName("StatusLine")
+
         right.addWidget(self.reg_preview, alignment=Qt.AlignLeft)
+        right.addWidget(self.reg_banner)
         right.addWidget(self.reg_status)
         right.addStretch(1)
 
         rl.addLayout(left, 1)
         rl.addLayout(right, 2)
 
-        # ATTENDANCE TAB
+        # Attendance
         att = QWidget()
         al = QHBoxLayout(att)
 
         aleft = QVBoxLayout()
-        aleft.addWidget(QLabel("<h2>Attendance (Auto IN/OUT)</h2>"))
+        t2 = QLabel("Attendance (AUTO IN/OUT)")
+        t2.setObjectName("H2")
+        aleft.addWidget(t2)
 
         self.operator = QLineEdit("Admin")
         self.threshold = QSpinBox(); self.threshold.setRange(30, 120); self.threshold.setValue(DEFAULT_THRESHOLD)
-        self.chk_multi = QCheckBox("Multi-face mode (mark many)"); self.chk_multi.setChecked(True)
-        self.chk_liveness = QCheckBox("Require blink (anti-proxy demo)"); self.chk_liveness.setChecked(False)
+        self.chk_multi = QCheckBox("Multi-face mode"); self.chk_multi.setChecked(True)
+        self.chk_liveness = QCheckBox("Require blink (optional)"); self.chk_liveness.setChecked(False)
         self.chk_unknown = QCheckBox("Save unknown snapshots"); self.chk_unknown.setChecked(True)
 
-        # Configurable time rules UI
-        self.in_until = QLineEdit("11:00")
-        self.out_after = QLineEdit("16:00")
-        self.late_after_in = QLineEdit("09:10")
+        cfg = QGroupBox("OUT Rule (Hours)")
+        cl = QVBoxLayout(cfg)
+        lh = QLabel("Allow OUT only after N hour(s) from IN"); lh.setObjectName("Lbl")
+        self.out_gap_hours_spin = QSpinBox(); self.out_gap_hours_spin.setRange(0, 24); self.out_gap_hours_spin.setValue(0)
+        cl.addWidget(lh)
+        cl.addWidget(self.out_gap_hours_spin)
 
-        self.btn_apply_rules = QPushButton("Apply Time Rules"); self.btn_apply_rules.setObjectName("secondary")
-        self.btn_apply_rules.clicked.connect(self.apply_time_rules)
-
-        self.btn_att_start = QPushButton("Start Camera")
+        self.btn_att_start = QPushButton("▶ START CAMERA")
         self.btn_att_start.clicked.connect(lambda: self.start_camera("attendance"))
-        self.btn_att_stop = QPushButton("Stop Camera"); self.btn_att_stop.setObjectName("danger")
+        self.btn_att_stop = QPushButton("■ STOP"); self.btn_att_stop.setObjectName("danger")
         self.btn_att_stop.clicked.connect(self.stop_camera)
 
-        self.banner = QLabel("Ready")
-        self.banner.setObjectName("BannerInfo")
-        self.banner.setAlignment(Qt.AlignCenter)
+        self.banner = QLabel("READY"); self.banner.setObjectName("Banner"); self.banner.setAlignment(Qt.AlignCenter)
 
-        aleft.addWidget(QLabel("Operator")); aleft.addWidget(self.operator)
+        lo = QLabel("Operator"); lo.setObjectName("Lbl")
+        lt = QLabel("Threshold"); lt.setObjectName("Lbl")
 
-        rules = QGroupBox("Time Rules (Configurable)")
-        rlay = QVBoxLayout(rules)
-        rlay.addWidget(QLabel("IN allowed until (HH:MM)"))
-        rlay.addWidget(self.in_until)
-        rlay.addWidget(QLabel("OUT allowed after (HH:MM)"))
-        rlay.addWidget(self.out_after)
-        rlay.addWidget(QLabel("Late after (HH:MM)"))
-        rlay.addWidget(self.late_after_in)
-        rlay.addWidget(self.btn_apply_rules)
-        aleft.addWidget(rules)
-
-        aleft.addWidget(QLabel("Threshold")); aleft.addWidget(self.threshold)
-        aleft.addWidget(self.chk_multi)
-        aleft.addWidget(self.chk_liveness)
-        aleft.addWidget(self.chk_unknown)
-        aleft.addWidget(self.btn_att_start)
-        aleft.addWidget(self.btn_att_stop)
+        aleft.addWidget(lo); aleft.addWidget(self.operator)
+        aleft.addWidget(cfg)
+        aleft.addWidget(lt); aleft.addWidget(self.threshold)
+        aleft.addWidget(self.chk_multi); aleft.addWidget(self.chk_liveness); aleft.addWidget(self.chk_unknown)
+        aleft.addWidget(self.btn_att_start); aleft.addWidget(self.btn_att_stop)
         aleft.addWidget(self.banner)
         aleft.addStretch(1)
 
         aright = QVBoxLayout()
-        self.att_preview = QLabel("Attendance Preview")
-        self.att_preview.setObjectName("Preview")
-        self.att_preview.setFixedSize(PREVIEW_W, PREVIEW_H)
+        self.att_preview = QLabel("ATTENDANCE PREVIEW"); self.att_preview.setObjectName("Preview")
+        self.att_preview.setMinimumSize(PREVIEW_MIN_W, PREVIEW_MIN_H)
+        self.att_preview.setMaximumSize(PREVIEW_MAX_W, PREVIEW_MAX_H)
         self.att_preview.setAlignment(Qt.AlignCenter)
-        self.att_info = QLabel("Live: -")
-        self.att_info.setStyleSheet("color:#cbd5e1; font-weight:800; padding:6px;")
+
+        self.att_info = QLabel("Live: -"); self.att_info.setObjectName("StatusLine")
         aright.addWidget(self.att_preview, alignment=Qt.AlignLeft)
         aright.addWidget(self.att_info)
         aright.addStretch(1)
@@ -512,47 +454,40 @@ class MainWindow(QMainWindow):
         al.addLayout(aleft, 1)
         al.addLayout(aright, 2)
 
-        # RECORDS TAB
+        # Records
         rec = QWidget()
         rcl = QVBoxLayout(rec)
 
         top = QHBoxLayout()
-        self.btn_refresh_rec = QPushButton("Refresh")
-        self.btn_refresh_rec.clicked.connect(self.refresh_all)
-        self.btn_export_today = QPushButton("Export Today CSV")
-        self.btn_export_today.clicked.connect(self.export_today)
-        self.btn_export_all = QPushButton("Export All CSV")
-        self.btn_export_all.clicked.connect(self.export_all)
-        self.btn_export_reg = QPushButton("Export Registered CSV"); self.btn_export_reg.setObjectName("secondary")
-        self.btn_export_reg.clicked.connect(self.export_registered)
-        for b in [self.btn_refresh_rec, self.btn_export_today, self.btn_export_all, self.btn_export_reg]:
-            top.addWidget(b)
+        self.btn_ref = QPushButton("⟳ REFRESH"); self.btn_ref.clicked.connect(self.refresh_all)
+        self.btn_exp_today = QPushButton("⬇ EXPORT TODAY"); self.btn_exp_today.clicked.connect(self.export_today)
+        self.btn_exp_all = QPushButton("⬇ EXPORT ALL"); self.btn_exp_all.clicked.connect(self.export_all)
+        self.btn_exp_reg = QPushButton("⬇ EXPORT REGISTERED"); self.btn_exp_reg.clicked.connect(self.export_registered)
+        top.addWidget(self.btn_ref); top.addWidget(self.btn_exp_today); top.addWidget(self.btn_exp_all); top.addWidget(self.btn_exp_reg)
         top.addStretch(1)
         rcl.addLayout(top)
 
-        self.table_today = QTableWidget(0, 10)
-        self.table_today.setHorizontalHeaderLabels(["RecordID","Date","Time","ID","Name","Event","Status","Conf","Operator","Snapshot"])
+        self.table_today = QTableWidget(0, len(ATT_COLS))
+        self.table_today.setHorizontalHeaderLabels([c.upper() for c in ATT_COLS])
         self.table_today.setColumnHidden(0, True)
         self.table_today.horizontalHeader().setStretchLastSection(True)
 
-        self.table_all = QTableWidget(0, 10)
-        self.table_all.setHorizontalHeaderLabels(["RecordID","Date","Time","ID","Name","Event","Status","Conf","Operator","Snapshot"])
+        self.table_all = QTableWidget(0, len(ATT_COLS))
+        self.table_all.setHorizontalHeaderLabels([c.upper() for c in ATT_COLS])
         self.table_all.setColumnHidden(0, True)
         self.table_all.horizontalHeader().setStretchLastSection(True)
 
         actions = QHBoxLayout()
-        self.btn_edit = QPushButton("✏ Edit Selected"); self.btn_edit.setObjectName("secondary")
-        self.btn_del = QPushButton("🗑 Delete Selected"); self.btn_del.setObjectName("danger")
+        self.btn_edit = QPushButton("✏ EDIT SELECTED"); self.btn_edit.setObjectName("secondary")
+        self.btn_del = QPushButton("🗑 DELETE SELECTED"); self.btn_del.setObjectName("danger")
         self.btn_edit.clicked.connect(self.edit_selected)
         self.btn_del.clicked.connect(self.delete_selected)
-        actions.addWidget(self.btn_edit)
-        actions.addWidget(self.btn_del)
-        actions.addStretch(1)
+        actions.addWidget(self.btn_edit); actions.addWidget(self.btn_del); actions.addStretch(1)
 
-        rcl.addWidget(QLabel("<b>Today</b>"))
+        rcl.addWidget(QLabel("<b>TODAY</b>"))
         rcl.addWidget(self.table_today)
         rcl.addLayout(actions)
-        rcl.addWidget(QLabel("<b>All Logs</b>"))
+        rcl.addWidget(QLabel("<b>ALL LOGS</b>"))
         rcl.addWidget(self.table_all)
 
         self.tabs.addTab(dash, "Dashboard")
@@ -560,48 +495,16 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(att, "Attendance")
         self.tabs.addTab(rec, "Records")
 
-    def make_click_card(self, title: str, value: str, accent: str, target_tab: int) -> ClickableCard:
-        card = ClickableCard()
-        card.setObjectName("Card")
-        card.setStyleSheet(f"QFrame{{border-left:6px solid {accent};}}")
-        l = QVBoxLayout(card)
+    def card(self, title, value, on_click):
+        c = ClickableCard()
+        c.setObjectName("Card")
+        lay = QVBoxLayout(c)
         t = QLabel(title); t.setObjectName("CardTitle")
         v = QLabel(value); v.setObjectName("CardValue")
-        card.value = v
-        l.addWidget(t)
-        l.addWidget(v)
-        card.clicked.connect(lambda: self.tabs.setCurrentIndex(target_tab))
-        return card
-
-    # ---------- Validation
-    def validate_register_inputs(self):
-        sid = self.reg_id.text().strip()
-        name = self.reg_name.text().strip()
-        if not sid.isdigit():
-            return False, "ID must be numeric."
-        if len(name) < 2:
-            return False, "Name must be at least 2 characters."
-        if self.reg_samples.value() < 10:
-            return False, "Samples must be at least 10."
-        return True, "OK"
-
-    def validate_model_ready(self):
-        if self.recognizer is None:
-            return False, "Model not trained. Register and Train first."
-        if not self.registered_map:
-            return False, "No registered persons found."
-        return True, "OK"
-
-    # ---------- Time rules apply
-    def apply_time_rules(self):
-        try:
-            self.in_allowed_until = parse_hhmm(self.in_until.text().strip())
-            self.out_allowed_after = parse_hhmm(self.out_after.text().strip())
-            self.late_after = parse_hhmm(self.late_after_in.text().strip())
-        except Exception:
-            show_popup(self, "Invalid Time", "Please enter time in HH:MM format (e.g., 16:00).", QMessageBox.Warning)
-            return
-        show_popup(self, "Rules Updated", f"IN until: {time_to_hhmm(self.in_allowed_until)}\nOUT after: {time_to_hhmm(self.out_allowed_after)}\nLate after: {time_to_hhmm(self.late_after)}")
+        c.value = v
+        lay.addWidget(t); lay.addWidget(v)
+        c.clicked.connect(on_click)
+        return c
 
     # ---------- Model
     def load_model(self):
@@ -624,43 +527,33 @@ class MainWindow(QMainWindow):
             label = int(parts[0])
             for img_path in person_folder.glob("*.jpg"):
                 img = cv2.imread(str(img_path), cv2.IMREAD_GRAYSCALE)
-                if img is None:
-                    continue
-                faces.append(img)
-                labels.append(label)
+                if img is not None:
+                    faces.append(img); labels.append(label)
         if not faces:
-            show_popup(self, "Training Failed", "No face images found. Register first.", QMessageBox.Warning)
+            ai_popup(self, "TRAINING FAILED", "No face images found. Register first.", QMessageBox.Warning)
             return
         recognizer.train(faces, np.array(labels))
         recognizer.save(str(TRAINER_PATH))
         self.load_model()
-        show_popup(self, "Training", "Model trained successfully.")
+        ai_popup(self, "MODEL READY", "Model trained successfully.")
         self.refresh_all()
 
     # ---------- Camera
-    def start_camera(self, mode: str):
-        if mode == "register":
-            ok, msg = self.validate_register_inputs()
-            if not ok:
-                show_popup(self, "Validation", msg, QMessageBox.Warning)
-                return
-
+    def start_camera(self, mode):
         self.mode = mode
         if self.cap is None:
             self.cap = cv2.VideoCapture(0)
         if not self.cap.isOpened():
-            show_popup(self, "Camera Error", "Could not open camera.", QMessageBox.Critical)
+            ai_popup(self, "CAMERA ERROR", "Could not open camera.", QMessageBox.Critical)
             self.cap = None
             return
         if not self.timer.isActive():
             self.timer.start(30)
         if mode == "register":
+            self.reg_banner.setText("CAMERA STARTED")
             self.reg_status.setText("Status: Camera started")
         else:
-            ok, msg = self.validate_model_ready()
-            if not ok:
-                show_popup(self, "Model", msg, QMessageBox.Warning)
-            self.banner.setText("Camera started")
+            self.banner.setText("SCANNING...")
 
     def stop_camera(self):
         if self.timer.isActive():
@@ -668,26 +561,27 @@ class MainWindow(QMainWindow):
         if self.cap is not None:
             self.cap.release()
             self.cap = None
-        self.banner.setText("Stopped")
+        self.banner.setText("STOPPED")
+        self.reg_banner.setText("STOPPED")
         self.reg_status.setText("Status: Stopped")
 
     # ---------- Register capture
     def start_capture(self):
-        ok, msg = self.validate_register_inputs()
-        if not ok:
-            show_popup(self, "Validation", msg, QMessageBox.Warning)
-            return
-        pid = int(self.reg_id.text().strip())
+        sid = self.reg_id.text().strip()
         name = self.reg_name.text().strip()
+        if not sid.isdigit() or len(name) < 2:
+            ai_popup(self, "VALIDATION", "Enter numeric ID and valid Name.", QMessageBox.Warning)
+            return
         self.reg_needed = int(self.reg_samples.value())
         self.reg_taken = 0
-        folder = DATASET_DIR / f"{pid}_{name.replace(' ', '_')}"
+        folder = DATASET_DIR / f"{int(sid)}_{name.replace(' ', '_')}"
         folder.mkdir(exist_ok=True)
         self.reg_folder = folder
+        self.reg_banner.setText("CAPTURING...")
         self.reg_status.setText("Status: Capturing samples...")
 
-    # ---------- Attendance: auto IN/OUT decision
-    def get_person_state_today(self, pid: int) -> tuple[bool, bool]:
+    # ---------- Auto IN/OUT with hour gap
+    def get_today_state(self, pid: int):
         df = load_day_df(today_str())
         if df.empty:
             return False, False
@@ -695,85 +589,81 @@ class MainWindow(QMainWindow):
         has_out = ((df["person_id"].astype(int) == pid) & (df["event"].astype(str) == "OUT")).any()
         return bool(has_in), bool(has_out)
 
-    def decide_event_auto(self, pid: int) -> tuple[str | None, str]:
-        """
-        Auto rules:
-        - If no record today => IN (only if before IN allowed until)
-        - If IN exists and OUT not => OUT (only if after OUT allowed after)
-        - Else => None
-        """
-        now_t = datetime.now().time()
-        has_in, has_out = self.get_person_state_today(pid)
-
+    def decide_event(self, pid: int, now_ts_: float):
+        has_in, has_out = self.get_today_state(pid)
         if not has_in and not has_out:
-            if now_t <= self.in_allowed_until:
-                return "IN", "First time today => IN"
-            return None, "IN time window closed"
-
+            return "IN", "First record today"
         if has_in and not has_out:
-            if now_t >= self.out_allowed_after:
-                return "OUT", "Already IN, allowed OUT now"
-            return None, "OUT allowed only after configured time"
-
-        return None, "Already completed IN & OUT today"
+            gap_hours = int(self.out_gap_hours_spin.value())
+            min_gap = gap_hours * 3600
+            in_ts = self.last_in_time_ts.get(pid)
+            if in_ts is not None and (now_ts_ - in_ts) < min_gap:
+                return None, f"OUT after {gap_hours} hour(s) from IN"
+            return "OUT", "Second record today"
+        return None, "Already IN & OUT today"
 
     def append_mark(self, pid: int, name: str, conf: float, event: str, operator: str, snap: str):
         df = load_day_df(today_str())
-        if event == "IN":
-            status = "Late" if datetime.now().time() > self.late_after else "OnTime"
-        else:
-            status = "-"
+        if not df.empty and ((df["person_id"].astype(int) == pid) & (df["event"].astype(str) == event)).any():
+            return False
         row = {
             "record_id": str(uuid4()),
             "date": today_str(),
             "time": now_time_str(),
-            "person_id": int(pid),
+            "person_id": pid,
             "name": name,
             "event": event,
-            "status": status,
             "confidence": round(float(conf), 2),
             "operator": operator,
             "snapshot_path": snap
         }
         df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
         save_day_df(today_str(), df)
+        if event == "IN":
+            self.last_in_time_ts[pid] = now_ts()
+        return True
 
-    # ---------- Records
+    # ---------- Edit/Delete
     def get_selected_row(self):
         table = self.table_today if self.table_today.currentRow() >= 0 else self.table_all
-        row = table.currentRow()
-        if row < 0:
+        r = table.currentRow()
+        if r < 0:
             return None
-        return {ATT_COLS[i]: (table.item(row, i).text() if table.item(row, i) else "") for i in range(len(ATT_COLS))}
+        row = {}
+        for i, col in enumerate(ATT_COLS):
+            item = table.item(r, i)
+            row[col] = item.text() if item else ""
+        return row
 
     def edit_selected(self):
         row = self.get_selected_row()
         if not row:
-            show_popup(self, "Edit", "Select a record first.", QMessageBox.Warning)
+            ai_popup(self, "EDIT", "Select a record first.", QMessageBox.Warning)
             return
         dlg = EditDialog(self, row)
         if dlg.exec() != QDialog.Accepted:
             return
         try:
-            fields = dlg.fields()
+            fields = dlg.get_fields()
         except Exception as e:
-            show_popup(self, "Edit Failed", str(e), QMessageBox.Warning)
+            ai_popup(self, "EDIT FAILED", str(e), QMessageBox.Warning)
             return
         date_ = row["date"]
         df = load_day_df(date_)
         mask = df["record_id"].astype(str) == str(row["record_id"])
         if not mask.any():
-            show_popup(self, "Edit", "Record not found.", QMessageBox.Warning)
+            ai_popup(self, "EDIT", "Record not found in file.", QMessageBox.Warning)
             return
         for k, v in fields.items():
             df.loc[mask, k] = v
         save_day_df(date_, df)
+        ai_popup(self, "UPDATED", "Record updated successfully.")
         self.refresh_all()
 
     def delete_selected(self):
         row = self.get_selected_row()
         if not row:
-            show_popup(self, "Delete", "Select a record first.", QMessageBox.Warning)
+            ai_popup(self, "DELETE", "Select a record first.", QMessageBox.Warning)
             return
         ans = QMessageBox.question(self, "Confirm Delete", "Delete selected record?", QMessageBox.Yes | QMessageBox.No)
         if ans != QMessageBox.Yes:
@@ -782,46 +672,48 @@ class MainWindow(QMainWindow):
         df = load_day_df(date_)
         df = df[df["record_id"].astype(str) != str(row["record_id"])].reset_index(drop=True)
         save_day_df(date_, df)
+        ai_popup(self, "DELETED", "Record deleted successfully.")
         self.refresh_all()
 
     # ---------- Exports
     def export_today(self):
         df = load_day_df(today_str())
         if df.empty:
-            show_popup(self, "Export", "No records today.", QMessageBox.Information)
+            ai_popup(self, "EXPORT", "No records today.")
             return
         path, _ = QFileDialog.getSaveFileName(self, "Save CSV", f"attendance_{today_str()}.csv", "CSV Files (*.csv)")
         if not path:
             return
         df.to_csv(path, index=False)
-        show_popup(self, "Export", f"Saved:\n{path}", QMessageBox.Information)
+        ai_popup(self, "EXPORT", f"Saved:\n{path}")
 
     def export_all(self):
         df = export_all_combined_df()
         if df.empty:
-            show_popup(self, "Export", "No logs found.", QMessageBox.Information)
+            ai_popup(self, "EXPORT", "No logs found.")
             return
         path, _ = QFileDialog.getSaveFileName(self, "Save CSV", "attendance_all.csv", "CSV Files (*.csv)")
         if not path:
             return
         df.to_csv(path, index=False)
-        show_popup(self, "Export", f"Saved:\n{path}", QMessageBox.Information)
+        ai_popup(self, "EXPORT", f"Saved:\n{path}")
 
     def export_registered(self):
         df = registered_df()
         if df.empty:
-            show_popup(self, "Export", "No registered candidates.", QMessageBox.Information)
+            ai_popup(self, "EXPORT", "No registered candidates.")
             return
         path, _ = QFileDialog.getSaveFileName(self, "Save CSV", "registered_candidates.csv", "CSV Files (*.csv)")
         if not path:
             return
         df.to_csv(path, index=False)
-        show_popup(self, "Export", f"Saved:\n{path}", QMessageBox.Information)
+        ai_popup(self, "EXPORT", f"Saved:\n{path}")
 
     # ---------- Refresh
     def refresh_all(self):
         reg = registered_df()
         df_today = load_day_df(today_str())
+
         in_today = 0 if df_today.empty else int((df_today["event"].astype(str) == "IN").sum())
         out_today = 0 if df_today.empty else int((df_today["event"].astype(str) == "OUT").sum())
         unknown_today = len(list(SNAP_UNKNOWN.glob(f"{today_str()}_*.jpg")))
@@ -834,11 +726,22 @@ class MainWindow(QMainWindow):
         self.fill_table(self.table_today, df_today)
         self.fill_table(self.table_all, export_all_combined_df())
 
+        # recent activity
+        self.recent.setRowCount(0)
+        if not df_today.empty:
+            df2 = df_today.sort_values(by="time", ascending=False).head(10)
+            for _, r in df2.iterrows():
+                i = self.recent.rowCount()
+                self.recent.insertRow(i)
+                vals = [r["time"], r["person_id"], r["name"], r["event"], r["confidence"]]
+                for c, v in enumerate(vals):
+                    self.recent.setItem(i, c, QTableWidgetItem(str(v)))
+
     def fill_table(self, table, df):
         table.setRowCount(0)
         if df is None or df.empty:
             return
-        df = ensure_att_cols(df).sort_values(by=["date", "time"], ascending=False)
+        df = ensure_cols(df).sort_values(by=["date","time"], ascending=False)
         for _, r in df.iterrows():
             i = table.rowCount()
             table.insertRow(i)
@@ -855,42 +758,44 @@ class MainWindow(QMainWindow):
 
         display = frame.copy()
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        faces = face_cascade.detectMultiScale(gray, scaleFactor=1.2, minNeighbors=5, minSize=(90, 90))
-        now_ts = time.time()
+        faces = face_cascade.detectMultiScale(gray, 1.2, 5, minSize=(90, 90))
+        t = now_ts()
 
         if self.mode == "register":
-            # capture samples
-            if self.reg_folder is not None and self.reg_taken < self.reg_needed and len(faces) > 0:
-                x, y, w, h = max(faces, key=lambda b: b[2] * b[3])
-                face_img = cv2.resize(gray[y:y+h, x:x+w], FACE_SIZE)
-                if blur_score(face_img) >= REG_BLUR_MIN:
-                    self.reg_taken += 1
-                    cv2.imwrite(str(self.reg_folder / f"{self.reg_taken}.jpg"), face_img)
-                    self.reg_status.setText(f"Status: Captured {self.reg_taken}/{self.reg_needed}")
+            if self.reg_folder is not None and self.reg_taken < self.reg_needed:
+                if len(faces) == 0:
+                    self.reg_status.setText("Status: No face detected...")
                 else:
-                    self.reg_status.setText("Status: Too blurry. Hold still...")
-                if self.reg_taken >= self.reg_needed:
-                    self.reg_status.setText("Status: Capture complete. Click Train Model.")
-                    self.refresh_all()
+                    x, y, w, h = max(faces, key=lambda b: b[2]*b[3])
+                    face_img = cv2.resize(gray[y:y+h, x:x+w], FACE_SIZE)
+                    if blur_score(face_img) >= REG_BLUR_MIN:
+                        self.reg_taken += 1
+                        cv2.imwrite(str(self.reg_folder / f"{self.reg_taken}.jpg"), face_img)
+                        self.reg_status.setText(f"Captured successfully: {self.reg_taken}/{self.reg_needed}")
+                    else:
+                        self.reg_status.setText("Too blurry, hold still...")
+
+                    if self.reg_taken >= self.reg_needed:
+                        self.reg_banner.setText("CAPTURE COMPLETED ✅")
+                        ai_popup(self, "Capture Completed", "Captured successfully. Now click TRAIN MODEL.")
+                        self.refresh_all()
 
             for (x, y, w, h) in faces:
-                cv2.rectangle(display, (x, y), (x+w, y+h), (0, 255, 0), 2)
+                cv2.rectangle(display, (x, y), (x+w, y+h), (0,255,0), 2)
 
-            self.reg_preview.setPixmap(frame_to_pixmap(display, PREVIEW_W, PREVIEW_H))
+            self.reg_preview.setPixmap(frame_to_pixmap(display, self.reg_preview.width(), self.reg_preview.height()))
             return
 
         if self.mode == "attendance":
-            ok_model, msg = self.validate_model_ready()
-            if not ok_model:
-                self.banner.setText("Model not trained")
-                self.att_info.setText(msg)
-                self.att_preview.setPixmap(frame_to_pixmap(display, PREVIEW_W, PREVIEW_H))
+            if self.recognizer is None:
+                self.banner.setText("MODEL NOT TRAINED")
+                self.att_info.setText("Register + Train model first.")
+                self.att_preview.setPixmap(frame_to_pixmap(display, self.att_preview.width(), self.att_preview.height()))
                 return
 
             threshold = int(self.threshold.value())
             operator = self.operator.text().strip() or "Operator"
-
-            live_names = []
+            live = []
             marked_any = False
 
             for (x, y, w, h) in faces:
@@ -901,77 +806,68 @@ class MainWindow(QMainWindow):
                 if dist < threshold:
                     pid = int(label)
                     name = self.registered_map.get(pid, f"ID {pid}")
-                    live_names.append(f"{name}({pid})")
+                    live.append(f"{name}({pid})")
 
-                    # AUTO decide IN/OUT for this person
-                    event, reason = self.decide_event_auto(pid)
+                    event, reason = self.decide_event(pid, t)
                     if event is None:
-                        cv2.rectangle(display, (x, y), (x+w, y+h), (0, 165, 255), 2)
-                        cv2.putText(display, reason, (x, y-10),
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 165, 255), 2)
+                        cv2.rectangle(display, (x, y), (x+w, y+h), (0,165,255), 2)
+                        cv2.putText(display, reason, (x, y-10), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0,165,255), 2)
                         continue
 
-                    # liveness
                     if self.chk_liveness.isChecked():
-                        blink_ts = self.blink_gate.update(face_img, now_ts)
-                        if now_ts - blink_ts > 3.0:
-                            self.banner.setText("Blink required (anti-proxy)")
-                            cv2.putText(display, "Blink required", (x, y-10),
-                                        cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 165, 255), 2)
+                        blink_ts = self.blink_gate.update(face_img, t)
+                        if t - blink_ts > 3.0:
+                            self.banner.setText("BLINK REQUIRED")
                             continue
 
-                    # cooldown per pid+event
                     key = (pid, event)
-                    last = self.cooldown.get(key, 0.0)
-                    if now_ts - last < COOLDOWN_SECONDS:
+                    if t - self.cooldown.get(key, 0.0) < COOLDOWN_SECONDS:
                         continue
 
-                    # mark
-                    snap_path = str(SNAP_MARKED / f"{today_str()}_{now_time_str().replace(':','')}_ID{pid}_{event}.jpg")
-                    cv2.imwrite(snap_path, frame)
-                    self.append_mark(pid, name, conf, event, operator, snap_path)
-                    self.cooldown[key] = now_ts
+                    snap = str(SNAP_MARKED / f"{today_str()}_{now_time_str().replace(':','')}_ID{pid}_{event}.jpg")
+                    cv2.imwrite(snap, frame)
+
+                    if not self.append_mark(pid, name, conf, event, operator, snap):
+                        continue
+
+                    self.cooldown[key] = t
                     marked_any = True
 
-                    cv2.rectangle(display, (x, y), (x+w, y+h), (0, 255, 0), 2)
+                    cv2.rectangle(display, (x, y), (x+w, y+h), (0,255,0), 2)
                     cv2.putText(display, f"{name} {event} conf:{conf:.1f}", (x, y-10),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 255, 0), 2)
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0,255,0), 2)
 
-                    self.banner.setText("Attendance Taken Successfully")
+                    self.banner.setText("ATTENDANCE TAKEN SUCCESSFULLY ✅")
                     self.att_info.setText(f"{event} marked: {name} (ID {pid})")
 
-                    show_popup(
-                        self,
-                        "Attendance Taken Successfully",
-                        f"{event} marked for:\n\nName: {name}\nID: {pid}\nTime: {now_time_str()}\nDate: {today_str()}",
-                        QMessageBox.Information
-                    )
+                    ai_popup(self, "Attendance Taken Successfully",
+                             f"{event} marked for:\n\nName: {name}\nID: {pid}\nTime: {now_time_str()}\nDate: {today_str()}",
+                             QMessageBox.Information)
                     QApplication.beep()
                     self.refresh_all()
 
                     if not self.chk_multi.isChecked():
                         break
                 else:
-                    cv2.rectangle(display, (x, y), (x+w, y+h), (255, 80, 80), 2)
-                    cv2.putText(display, "Unknown", (x, y-10),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 80, 80), 2)
+                    cv2.rectangle(display, (x, y), (x+w, y+h), (255,80,80), 2)
+                    cv2.putText(display, "Unknown", (x, y-10), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255,80,80), 2)
 
             if len(faces) == 0:
-                self.banner.setText("No face detected")
+                self.banner.setText("NO FACE DETECTED")
                 self.att_info.setText("Live: -")
             else:
                 if not marked_any:
-                    self.banner.setText("Scanning...")
-                if live_names:
-                    self.att_info.setText("Live: " + ", ".join(live_names[:6]))
+                    self.banner.setText("SCANNING...")
+                if live:
+                    self.att_info.setText("Live: " + ", ".join(live[:6]))
 
-                if self.chk_unknown.isChecked() and not marked_any and (now_ts - self.last_unknown_ts) > UNKNOWN_SAVE_COOLDOWN:
+                if self.chk_unknown.isChecked() and not marked_any and (t - self.last_unknown_ts) > UNKNOWN_SAVE_COOLDOWN:
                     unknown_path = SNAP_UNKNOWN / f"{today_str()}_{now_time_str().replace(':','')}_unknown.jpg"
                     cv2.imwrite(str(unknown_path), frame)
-                    self.last_unknown_ts = now_ts
+                    self.last_unknown_ts = t
                     self.refresh_all()
 
-            self.att_preview.setPixmap(frame_to_pixmap(display, PREVIEW_W, PREVIEW_H))
+            self.att_preview.setPixmap(frame_to_pixmap(display, self.att_preview.width(), self.att_preview.height()))
 
 def main():
     app = QApplication(sys.argv)
