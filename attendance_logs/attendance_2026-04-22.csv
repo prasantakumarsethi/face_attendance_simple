@@ -1,0 +1,2 @@
+record_id,date,time,person_id,name,event,confidence,operator,snapshot_path
+7dc17deb-7c3b-4b99-b64e-3af2d724f275,2026-04-22,21:49:03,1,Test Demo,IN,78.72,Admin,attendance_logs\snapshots\marked\2026-04-22_214903_ID1_IN.jpg
