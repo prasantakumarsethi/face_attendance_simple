@@ -1,8 +1,39 @@
+Here’s a **production-quality `README.md`** tailored exactly to your provided code (PySide6 + OpenCV + Pandas + CSV logging + GUI system):
+
+---
+
 ```markdown
-# 🎯 Face Attendance System (SQLite + OpenCV)
+# 🎯 AI Smart Face Attendance System
 
-A simple face-based attendance system built using **Python, OpenCV, and SQLite**.  
-This project detects faces via webcam, marks attendance in a database, and can send email notifications.
+A **production-ready desktop application** for face-based attendance using **Python, OpenCV, and PySide6 (Qt UI)**.  
+This system provides **real-time face recognition, automated IN/OUT marking, dataset management, and analytics dashboard**.
+
+---
+
+## 🚀 Key Highlights
+
+- 🎥 Real-time face detection & recognition (OpenCV LBPH)
+- 🧠 Smart **AUTO IN / OUT logic**
+- 👁️ Optional **Blink Detection (Liveness Check)**
+- 🧾 CSV-based attendance logging (daily + combined)
+- 📊 Interactive **Dashboard with analytics**
+- 🖥️ Modern **PySide6 UI (dark theme)**
+- 📸 Snapshot storage (recognized & unknown faces)
+- 📤 Export reports (Today / All / Registered)
+- ✏️ Edit & Delete attendance records
+- 🧑‍💼 Multi-user dataset management
+
+---
+
+## 🛠️ Tech Stack
+
+| Technology | Purpose |
+|----------|--------|
+| Python 3.x | Core programming |
+| OpenCV | Face detection & recognition |
+| PySide6 (Qt) | GUI application |
+| NumPy | Image processing |
+| Pandas | Data handling & CSV operations |
 
 ---
 
@@ -10,153 +41,274 @@ This project detects faces via webcam, marks attendance in a database, and can s
 
 ```
 
-face_attendance_sqlite/
-│  app.py
-│  requirements.txt
+project/
 │
-├─ core/
-│   ├─ db.py
-│   ├─ vision.py
-│   ├─ mailer.py
-│   └─ reports.py
+├── dataset/                 # Registered user face datasets
+│   └── <id_name>/
+│       └── images...
 │
-└─ data/
-├─ snapshots/
-│   ├─ marked/
-│   └─ unknown/
-└─ app.db
+├── trainer/
+│   └── trainer.yml         # Trained face model
+│
+├── attendance_logs/
+│   ├── attendance_YYYY-MM-DD.csv
+│   └── snapshots/
+│       ├── marked/         # Recognized faces
+│       └── unknown/        # Unknown detections
+│
+└── main.py                 # Your main application file
 
 ````
 
 ---
 
-## 🚀 Features
+## ⚙️ Installation & Setup
 
-- 🎥 Real-time face detection using OpenCV
-- 🗂️ SQLite database for storing attendance
-- 🧾 Attendance logs with timestamps
-- 📧 Email notification after marking attendance
-- 📊 Basic attendance report generation
-- 📁 Snapshot storage for marked/unknown faces (extendable)
+### 1️⃣ Clone / Copy Project
 
----
-
-## 🛠️ Tech Stack
-
-- Python 3.x
-- OpenCV
-- SQLite3
-- SMTP (for email alerts)
-
----
-
-## ⚙️ Setup Instructions
-
-### 1️⃣ Clone the repository
 ```bash
 git clone <your-repo-url>
-cd face_attendance_sqlite
+cd project
 ````
 
 ---
 
 ### 2️⃣ Create Virtual Environment
 
-```cmd
-py -m venv .venv
-.venv\Scripts\activate
+```bash
+python -m venv venv
+```
+
+Activate:
+
+* Windows:
+
+```bash
+venv\Scripts\activate
+```
+
+* Mac/Linux:
+
+```bash
+source venv/bin/activate
 ```
 
 ---
 
 ### 3️⃣ Install Dependencies
 
-```cmd
-py -m pip install -r requirements.txt
+```bash
+pip install opencv-python opencv-contrib-python PySide6 numpy pandas
+```
+
+> ⚠️ `opencv-contrib-python` is REQUIRED for LBPH recognizer
+
+---
+
+### 4️⃣ Run Application
+
+```bash
+python main.py
 ```
 
 ---
 
-### 4️⃣ Run the Application
+## 🎯 How It Works
 
-```cmd
-python app.py
+### 🔹 1. Registration Phase
+
+* Go to **Register Tab**
+* Enter:
+
+  * Person ID (numeric)
+  * Name
+  * Number of samples
+* Start camera → Capture face samples
+* Train model
+
+📌 Data stored in:
+
+```
+dataset/<id_name>/
 ```
 
 ---
 
-## 🗄️ Database Details
+### 🔹 2. Training
 
-The SQLite database (`app.db`) is auto-created inside the `data/` folder.
-
-### Tables:
-
-* **users**
-
-  * id (Primary Key)
-  * name
-
-* **attendance**
-
-  * id (Primary Key)
-  * user_id (Foreign Key)
-  * timestamp
-  * status
-
----
-
-## 📧 Email Configuration
-
-Update credentials in:
+* Click **Train Model**
+* Generates:
 
 ```
-core/mailer.py
-```
-
-```python
-sender = "your_email@gmail.com"
-password = "your_app_password"
-```
-
-> ⚠️ Use **App Password** (not your real Gmail password)
-
----
-
-## 📊 Sample Output
-
-```
-Starting camera...
-Face detected!
-Attendance marked!
-Attendance Report:
-('John Doe', '2026-04-22T10:15:30', 'Present')
+trainer/trainer.yml
 ```
 
 ---
 
-## ⚠️ Limitations (Current Version)
+### 🔹 3. Attendance System
 
-* Uses basic Haarcascade (not highly accurate)
-* No real face recognition (only detection)
-* Hardcoded user_id
-* No duplicate attendance prevention
+* Start camera in **Attendance Tab**
+* System:
+
+  * Detects face
+  * Recognizes user
+  * Automatically decides:
+
+    * ✅ IN (first entry)
+    * ✅ OUT (based on time gap rule)
+
+---
+
+## 🧠 Smart Features
+
+### ✅ Auto IN/OUT Logic
+
+| Condition         | Action               |
+| ----------------- | -------------------- |
+| No record today   | IN                   |
+| IN exists, no OUT | OUT (after time gap) |
+| IN & OUT done     | Ignore               |
+
+---
+
+### ⏱️ OUT Rule Configuration
+
+You can define:
+
+```
+Allow OUT only after N hours from IN
+```
+
+---
+
+### 👁️ Liveness Detection (Optional)
+
+* Uses **eye detection (blink)**
+* Prevents spoofing (photo attacks)
+
+---
+
+### 🔁 Cooldown System
+
+* Prevents duplicate marking
+* Configurable delay between entries
+
+---
+
+## 📊 Dashboard Features
+
+* 👥 Total Registered Users
+* 🟢 IN Today
+* 🔴 OUT Today
+* ❓ Unknown Faces
+* 📋 Recent Activity Table
+
+---
+
+## 📁 Attendance Logs
+
+Stored as:
+
+```
+attendance_logs/attendance_YYYY-MM-DD.csv
+```
+
+### Columns:
+
+| Field         | Description            |
+| ------------- | ---------------------- |
+| record_id     | Unique UUID            |
+| date          | Date                   |
+| time          | Time                   |
+| person_id     | User ID                |
+| name          | User name              |
+| event         | IN / OUT               |
+| confidence    | Recognition confidence |
+| operator      | System operator        |
+| snapshot_path | Image path             |
+
+---
+
+## 📸 Snapshots
+
+### Recognized:
+
+```
+attendance_logs/snapshots/marked/
+```
+
+### Unknown:
+
+```
+attendance_logs/snapshots/unknown/
+```
+
+---
+
+## 📤 Export Options
+
+* Export Today’s Records
+* Export All Records
+* Export Registered Users
+
+---
+
+## ✏️ Record Management
+
+* Edit any field (ID, name, event, etc.)
+* Delete records
+* Real-time UI update
+
+---
+
+## ⚠️ Requirements & Notes
+
+* Webcam required
+* Good lighting improves accuracy
+* Face should be clearly visible during registration
+* Minimum blur threshold enforced
 
 ---
 
 ## 🔥 Future Enhancements
 
-* ✅ Face Recognition using `face_recognition` / Deep Learning
-* ✅ User Registration Module
-* ✅ GUI using PyQt
-* ✅ Export reports to Excel
-* ✅ REST API (Spring Boot / FastAPI)
-* ✅ Cloud deployment
+* 🔐 Face Recognition using Deep Learning (FaceNet / Dlib)
+* 🌐 REST API integration (Spring Boot / FastAPI)
+* 📱 Mobile App integration
+* ☁️ Cloud storage (AWS / Firebase)
+* 📊 Advanced analytics dashboard
+* 🧾 Excel/PDF report export
+* 👤 User authentication system
 
 ---
 
-## 🤝 Contributing
+## 🐞 Troubleshooting
 
-Contributions are welcome! Feel free to fork and improve the project.
+### Camera not opening?
+
+* Check if camera is used by another app
+
+### Model not working?
+
+* Ensure:
+
+  * Dataset exists
+  * Model is trained
+
+### Low accuracy?
+
+* Improve:
+
+  * Lighting
+  * Face angle
+  * Number of samples
+
+---
+
+## 👨‍💻 Author
+
+**Prasanta Kumar Sethi**
+Software Engineer | Java Full Stack Developer
 
 ---
 
@@ -166,205 +318,12 @@ This project is open-source and free to use.
 
 ---
 
-## 👨‍💻 Author
+## ⭐ Support
 
-**Prasanta Kumar Sethi**
-Software Engineer | Java Full Stack Developer
+If you like this project:
 
-```
-
----
-
-If you want, I can also:
-✔ :contentReference[oaicite:0]{index=0}  
-✔ :contentReference[oaicite:1]{index=1}  
-✔ :contentReference[oaicite:2]{index=2}  
-
-Just tell me 👍
-```
-
-
-Here’s a polished, **GitHub-ready `README.md`** tailored specifically for your project:
+* ⭐ Star the repo
+* 🍴 Fork it
+* 🧠 Contribute improvements
 
 ---
-
-# 🎯 Face Attendance System (SQLite + OpenCV)
-
-A lightweight and practical **Face Attendance System** built using **Python, OpenCV, and SQLite**.
-It detects faces via webcam, logs attendance into a database, and supports email notifications and reporting.
-
----
-
-## 📁 Project Structure
-
-```
-face_attendance_sqlite/
-│  app.py
-│  requirements.txt
-│
-├─ core/
-│   ├─ db.py
-│   ├─ vision.py
-│   ├─ mailer.py
-│   └─ reports.py
-│
-└─ data/
-   ├─ snapshots/
-   │   ├─ marked/
-   │   └─ unknown/
-   └─ app.db
-```
-
----
-
-## 🚀 Features
-
-* 🎥 Real-time face detection using webcam
-* 🗄️ SQLite database for attendance storage
-* 🧾 Timestamp-based attendance logging
-* 📧 Email notification after marking attendance
-* 📊 Attendance report generation
-* 📁 Structured data storage for future scalability
-
----
-
-## 🛠️ Tech Stack
-
-* **Python 3.x**
-* **OpenCV**
-* **SQLite3**
-* **SMTP (Email Integration)**
-
----
-
-## ⚙️ Setup & Installation
-
-### 1️⃣ Clone the Repository
-
-```bash
-git clone <your-repo-url>
-cd face_attendance_sqlite
-```
-
----
-
-### 2️⃣ Create Virtual Environment
-
-```cmd
-py -m venv .venv
-.venv\Scripts\activate
-```
-
----
-
-### 3️⃣ Install Dependencies
-
-```cmd
-py -m pip install -r requirements.txt
-```
-
----
-
-### 4️⃣ Run the Application
-
-```cmd
-python app.py
-```
-
----
-
-## 🗄️ Database Schema
-
-The database (`app.db`) is automatically created inside the `data/` folder.
-
-### Tables:
-
-#### `users`
-
-| Column | Type         |
-| ------ | ------------ |
-| id     | INTEGER (PK) |
-| name   | TEXT         |
-
-#### `attendance`
-
-| Column    | Type         |
-| --------- | ------------ |
-| id        | INTEGER (PK) |
-| user_id   | INTEGER (FK) |
-| timestamp | TEXT         |
-| status    | TEXT         |
-
----
-
-## 📧 Email Configuration
-
-Update your email credentials in:
-
-```
-core/mailer.py
-```
-
-```python
-sender = "your_email@gmail.com"
-password = "your_app_password"
-```
-
-⚠️ Use an **App Password**, not your actual Gmail password.
-
----
-
-## 📊 Example Output
-
-```
-Starting camera...
-Face detected!
-Attendance marked!
-Attendance Report:
-('John Doe', '2026-04-22T10:15:30', 'Present')
-```
-
----
-
-## ⚠️ Current Limitations
-
-* Uses Haarcascade (basic detection, not recognition)
-* No real face identity matching yet
-* Hardcoded user handling
-* No duplicate attendance prevention
-
----
-
-## 🔥 Future Enhancements
-
-* ✅ Face Recognition (Deep Learning / embeddings)
-* ✅ User Registration System
-* ✅ PyQt GUI Dashboard
-* ✅ Excel/CSV Report Export
-* ✅ REST API integration
-* ✅ Cloud deployment support
-
----
-
-## 🤝 Contributing
-
-Feel free to fork, improve, and submit pull requests.
-
----
-
-## 📜 License
-
-This project is open-source and free to use.
-
----
-
-## 👨‍💻 Author
-
-**Prasanta Kumar Sethi**
-Software Engineer | Java Full Stack Developer
-* Add screenshots + demo GIF
-* Convert it into a **full UI app (PyQt)**
-* Add real face recognition (not just detection)
-
-Just tell me 👍
-
