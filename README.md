@@ -108,7 +108,7 @@ pip install opencv-python opencv-contrib-python PySide6 numpy pandas
 ### 4️⃣ Run Application
 
 ```bash
-python main.py
+python ui_app.py
 ```
 
 ---
